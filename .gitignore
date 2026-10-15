@@ -3,5 +3,7 @@
 
 *.gv
 *.gv.*
+*.png
+graph
 
 __pycache__
