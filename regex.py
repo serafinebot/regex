@@ -1,11 +1,13 @@
 from __future__ import annotations
 from functools import reduce, cached_property
+from collections import deque
 from collections.abc import Iterable, Callable
 from graphviz import Digraph
 from pprint import pformat
 import operator as op
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
+import io
 
 type Symbol = str | None
 
@@ -26,8 +28,8 @@ class DFA:
     if getattr(self, "_frozen", False): raise AttributeError("DFA is immutable")
     object.__setattr__(self, name, value)
 
-  def graphviz(self):
-    g = Digraph(graph_attr={"rankdir":"LR"})
+  def graphviz(self) -> Digraph:
+    g = Digraph(graph_attr={"rankdir": "LR", "dpi": "300"})
     g.node("entry", shape="point", width="0.1", height="0.1", label="")
     for i in range(len(self.delta)):
       attrs = {"label": str(i), "shape": "circle"}
@@ -38,11 +40,7 @@ class DFA:
       t = {}
       for sym, dst in zip(self.syms, trans, strict=True): t.setdefault(dst, []).append(sym)
       for dst, s in t.items(): g.edge(str(i), str(dst), label=",".join(s))
-    path = g.render(filename="graph", format="png")
-    plt.imshow(mpimg.imread(path))
-    plt.axis("off")
-    plt.show(block=True)
-    plt.close()
+    return g
 
 # TODO: NFAl should be immutable and a singleton (how do we compare two NFAls?)
 class NFA:
@@ -91,7 +89,7 @@ class NFA:
   def star(self) -> NFA:
     off = 1
     idelta = tuple({k: {x+off for x in v} for k, v in s.items()} for s in self.delta)
-    delta: tuple[dict[Symbol, set[int]], ...] = ({None: {off}}, *idelta, {None: {0}})
+    delta: tuple[dict[Symbol, set[int]], ...] = ({None: {off, len(idelta)+1}}, *idelta, {None: set()})
     final = len(delta)-1
     for f in self.final:
       delta[f+off].setdefault(None, set()).add(final)
@@ -141,19 +139,26 @@ class NFA:
         t.setdefault(q, {})[a] = d
         if dset & self.final: fin.add(d)
 
-    tbl = sorted(t.items(), key=lambda x: x[0])
-    corr = {k: i for i, (k, _) in enumerate(tbl)}
-    delta = [[0] * len(self.syms) for _ in range(len(tbl))]
+    # BFS from entry: number states in visit order -> entry = 0, then its targets, ...
+    corr = {ini: 0}
+    bfs = deque([ini])
+    while bfs:
+      q = bfs.popleft()
+      for d in t[q].values():
+        if d not in corr:
+          corr[d] = len(corr)
+          bfs.append(d)
+
+    delta = [[0] * len(self.syms) for _ in range(len(corr))]
     entry, final = corr[ini], {corr[x] for x in fin}
-    for k, f in tbl:
-      src = corr[k]
-      for sym, dst in f.items():
-        delta[src][self.syms.index(sym)] = corr[dst]
+    for q, trans in t.items():
+      for sym, d in trans.items():
+        delta[corr[q]][self.syms.index(sym)] = corr[d]
 
     return DFA(delta, entry, final, self.syms)
 
-  def graphviz(self):
-    g = Digraph(graph_attr={"rankdir":"LR"})
+  def graphviz(self) -> Digraph:
+    g = Digraph(graph_attr={"rankdir": "LR", "dpi": "300"})
     g.node("entry", shape="point", width="0.1", height="0.1", label="")
     for i in range(len(self.delta)):
       attrs = {"label": str(i), "shape": "circle"}
@@ -165,11 +170,22 @@ class NFA:
         for state_next in transitions:
           lbl = str(sym if sym is not None else "λ")
           g.edge(str(i), str(state_next), label=lbl)
-    path = g.render(filename="graph", format="png")
-    plt.imshow(mpimg.imread(path))
-    plt.axis("off")
-    plt.show(block=True)
-    plt.close()
+    return g
+
+def show(*graphs: Digraph, cols: int = 2):
+  imgs = [mpimg.imread(io.BytesIO(g.pipe(format="png")), format="png") for g in graphs]
+  n = len(imgs)
+  rows = (n + cols - 1) // cols
+
+  fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 5 * rows), squeeze=False)
+  for ax, im in zip(axes.flat, imgs, strict=True):
+    ax.imshow(im)
+    ax.axis("off")
+  for ax in axes.flat[n:]: ax.axis("off")
+
+  plt.tight_layout()
+  plt.show(block=True)
+  plt.close(fig)
 
 ab = NFA.symbols("ab")
 cd = NFA.symbols("cd")
@@ -181,16 +197,15 @@ cd = NFA.symbols("cd")
 # abcd_det = abcd.det()
 # abcd_det.graphviz()
 
-# ab_cd = ab | cd
-# ab_cd.det().graphviz()
+ab_cd = (ab | cd).star()
+show(ab_cd.graphviz(), ab_cd.det().graphviz())
 
 # a3 = NFA.symbols("a").pow(3)
 # a3.det().graphviz()
 
-# TODO: the det() version of this does not work
-astar = NFA.symbols("a").star()
-astar.graphviz()
-astar.det().graphviz()
+# det() works (verified on a*, a+, (ab|cd)*, a^3, (a|b)c, (ab|cd)abc)
+# astar = NFA.symbols("a").star()
+# show(astar.graphviz(), astar.det().graphviz())
 
 # aplus = NFA.symbols("a").plus()
 # aplus.graphviz()
