@@ -1,19 +1,24 @@
 from __future__ import annotations
-from functools import reduce, cached_property
+import io
+import operator as op
+from pprint import pformat
 from collections import deque
 from collections.abc import Iterable, Callable
+from functools import reduce, cached_property
 from graphviz import Digraph
-from pprint import pformat
-import operator as op
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
-import io
 
 type Symbol = str | None
 
-def _mask(*v: int) -> int: return reduce(lambda a, b: a | (1 << b), v, 0)
-def _unmask(b: int) -> set[int]: return {i for i in range(b.bit_length()) if b & (1 << i)}
 def _cast[T,C](v: T | Iterable[T], c: Callable[[Iterable[T]], C]) -> C: return c(v) if isinstance(v, Iterable) else c((v,))
+def _mask(*v: int) -> int: return reduce(lambda a, b: a | (1 << b), v, 0)
+def _mask_iter(m: int) -> Iterable[int]:
+  while m:
+    b = m & -m
+    yield b.bit_length() - 1
+    m ^= b
+def _unmask(m: int) -> set[int]: return set(_mask_iter(m))
 
 class DFA:
   __slots__ = ("_frozen", "delta", "entry", "final", "syms")
@@ -109,53 +114,39 @@ class NFA:
       f"entry: {pformat(self.entry, indent=2, width=100)}",
       f"final: {pformat(self.final, indent=2, width=100)}"))
 
-  def closure(self, states: set[int]) -> set[int]:
-    c, p = states.copy(), states.copy()
+  def closure(self, states: Iterable[int] | int) -> set[int]:
+    c, p = _cast(states, set), _cast(states, set)
     while len(p) > 0:
-      a = set(self.delta[p.pop()].get(None, ()))
+      a = set(self.delta[p.pop()].get(None, ())) - c
       c, p = c|a, p|a
     return c
 
-  def move(self, states: set[int] | int, sym: Symbol) -> set[int]:
+  def move(self, states: Iterable[int] | int, sym: Symbol) -> set[int]:
     return reduce(op.or_, (set(self.delta[s].get(sym, ())) for s in _cast(states, set)), set())
 
-  def det(self) -> DFA:
-    ini = _mask(*self.closure(set(self.entry)))
-    fin = {ini} if ini & _mask(*self.final) else set()
-    states = {ini}
-    queue = {ini}
-    vis = set()
-    t = {}
-    while len(queue) > 0:
-      q = queue.pop()
-      if q in vis: continue
-      vis.add(q)
-      for a in self.syms:
-        dset = self.closure(self.move(_unmask(q), a))
-        d = _mask(*dset)
-        if d not in states:
-          states.add(d)
-          queue.add(d)
-        t.setdefault(q, {})[a] = d
-        if dset & self.final: fin.add(d)
+  def det(self):
+    entry, final = _mask(*self.closure(self.entry)), _mask(*self.final)
 
-    # BFS from entry: number states in visit order -> entry = 0, then its targets, ...
-    corr = {ini: 0}
-    bfs = deque([ini])
-    while bfs:
-      q = bfs.popleft()
-      for d in t[q].values():
-        if d not in corr:
-          corr[d] = len(corr)
-          bfs.append(d)
+    n_syms = len(self.syms)
+    # closed-move per (state, symbol): move and closure both distribute over union
+    clos = [[_mask(*self.closure(self.move({s}, a))) for a in self.syms] for s in range(len(self.delta))]
+    def c(s: int) -> tuple[int, ...]: return tuple(reduce(op.or_, (clos[i][a] for i in _mask_iter(s)), 0) for a in range(n_syms))
 
-    delta = [[0] * len(self.syms) for _ in range(len(corr))]
-    entry, final = corr[ini], {corr[x] for x in fin}
-    for q, trans in t.items():
-      for sym, d in trans.items():
-        delta[corr[q]][self.syms.index(sym)] = corr[d]
+    # mark-on-enqueue worklist: every state enters q exactly once (no dedup guard
+    # needed), and t's insertion order IS the BFS discovery order
+    t: dict[int, tuple[int, ...]] = {entry: ()}
+    q = deque([entry])
+    while q:
+      s = q.popleft()
+      row = t[s] = c(s)
+      for d in row:
+        if d not in t:
+          t[d] = ()
+          q.append(d)
 
-    return DFA(delta, entry, final, self.syms)
+    corr = {s: i for i, s in enumerate(t)} # BFS numbering for free (dicts preserver insertion order); entry == key 0
+    delta = [[corr[d] for d in row] for row in t.values()]
+    return DFA(delta, 0, {i for s, i in corr.items() if s & final}, self.syms)
 
   def graphviz(self) -> Digraph:
     g = Digraph(graph_attr={"rankdir": "LR", "dpi": "300"})
@@ -197,15 +188,14 @@ cd = NFA.symbols("cd")
 # abcd_det = abcd.det()
 # abcd_det.graphviz()
 
-ab_cd = (ab | cd).star()
-show(ab_cd.graphviz(), ab_cd.det().graphviz())
+# ab_cd = (ab | cd).star()
+# show(ab_cd.graphviz(), ab_cd.det().graphviz())
 
 # a3 = NFA.symbols("a").pow(3)
 # a3.det().graphviz()
 
-# det() works (verified on a*, a+, (ab|cd)*, a^3, (a|b)c, (ab|cd)abc)
-# astar = NFA.symbols("a").star()
-# show(astar.graphviz(), astar.det().graphviz())
+astar = NFA.symbols("a").star()
+show(astar.graphviz(), astar.det().graphviz())
 
 # aplus = NFA.symbols("a").plus()
 # aplus.graphviz()
