@@ -2,6 +2,7 @@ from __future__ import annotations
 import io
 import operator as op
 from pprint import pformat
+from itertools import product
 from collections import deque
 from collections.abc import Iterable, Callable
 from functools import reduce, cached_property
@@ -20,6 +21,41 @@ def _mask_iter(m: int) -> Iterable[int]:
     m ^= b
 def _unmask(m: int) -> set[int]: return set(_mask_iter(m))
 
+class StateTable:
+  def __init__(self, n: int):
+    self.n = n
+    self.t: list[int|None] = [None] * int((n-1)*n/2)
+
+  def _idx(self, key: tuple[int,int]) -> int:
+    a, b = min(key[0], key[1]), max(key[0], key[1])
+    assert a != b, "indeces cannot be the same"
+    return (b-1)*b//2 + a
+
+  def __getitem__(self, key: tuple[int,int]) -> int|None: return self.t[self._idx(key)]
+  def __setitem__(self, key: tuple[int,int], value: int|None) -> int|None: self.t[self._idx(key)] = value
+
+  def where(self, fn: Callable[[tuple[int,int],int|None], bool] | None):
+    return ((i, j) for i in range(self.n) for j in range(i) if fn is None or fn((i, j), self[i, j]))
+  def unset(self) -> Iterable[tuple[int,int]]: return self.where(lambda _, v: v is None)
+  def set(self) -> Iterable[tuple[int,int]]: return self.where(lambda _, v: v is not None)
+  def indeces(self) -> Iterable[tuple[int,int]]: return self.where(None)
+
+  def __iter__(self): return iter(zip(self.indeces(), self.t, strict=True))
+
+  def __repr__(self):
+    t = ["" if x is None else str(x) for x in self.t]
+    m = max(1, *map(len, t))
+
+    st = [f"s{i}" for i in range(self.n)]
+    lalign = max(map(len, st))
+
+    s = []
+    for i in range(self.n):
+      b = i*(i-1)//2
+      s.append(f"s{i:<{lalign-1}d} | " +  " | ".join(f"{t[b+j]:>{m}s}" for j in range(i)) + " "*m + "|")
+    return "\n".join(s) + \
+           "\n" + " " * (lalign + 3) + (" "*(m+1)).join(st)
+
 class DFA:
   __slots__ = ("_frozen", "delta", "entry", "final", "syms")
   def __init__(self, delta: list[list[int]], entry: int, final: int | Iterable[int], syms: Iterable[Symbol]):
@@ -32,6 +68,41 @@ class DFA:
   def __setattr__(self, name, value):
     if getattr(self, "_frozen", False): raise AttributeError("DFA is immutable")
     object.__setattr__(self, name, value)
+
+  def min(self):
+    n_states, n_syms = len(self.delta), len(self.syms)
+    tbl = StateTable(n_states)
+    nonfinal = [i for i in range(n_states) if i not in self.final]
+    for a, b in product(self.final, nonfinal): tbl[a, b] = 0
+
+    changes, i = True, 0
+    while changes:
+      changes = False
+      i += 1
+      for a, b in tbl.unset():
+        for s in range(n_syms):
+          da, db = self.delta[a][s], self.delta[b][s]
+          if da != db and tbl[da, db] is not None:
+            tbl[a, b] = i
+            changes = True
+
+    corr = {i: _mask(i) for i in range(n_states)}
+    for a, b in tbl.unset(): corr[a] = corr[b] = _mask(a, b)
+
+    t: dict[int,tuple[int,...]] = {}
+    entry, final = corr[self.entry], {corr[f] for f in self.final}
+    q = deque([entry])
+    while q:
+      s = q.popleft()
+      if s in t: continue
+      sd = next(_mask_iter(s)) # all transitions *should* match for all merged states
+      t[s] = [corr[c] for c in self.delta[sd]]
+      q += t[s]
+
+    order = {s: i for i, s in enumerate(t)}
+    delta = [[order[d] for d in row] for row in t.values()]
+    return DFA(delta, 0, {i for s, i in order.items() if s in final}, self.syms)
+
 
   def graphviz(self) -> Digraph:
     g = Digraph(graph_attr={"rankdir": "LR", "dpi": "300"})
@@ -132,9 +203,9 @@ class NFA:
     clos = [[_mask(*self.closure(self.move({s}, a))) for a in self.syms] for s in range(len(self.delta))]
     def c(s: int) -> tuple[int, ...]: return tuple(reduce(op.or_, (clos[i][a] for i in _mask_iter(s)), 0) for a in range(n_syms))
 
-    # mark-on-enqueue worklist: every state enters q exactly once (no dedup guard
-    # needed), and t's insertion order IS the BFS discovery order
-    t: dict[int, tuple[int, ...]] = {entry: ()}
+    # mark-on-enqueue worklist: every state enters q exactly once
+    # and t's insertion order IS the BFS discovery order
+    t: dict[int,tuple[int,...]] = {entry: ()}
     q = deque([entry])
     while q:
       s = q.popleft()
@@ -144,9 +215,9 @@ class NFA:
           t[d] = ()
           q.append(d)
 
-    corr = {s: i for i, s in enumerate(t)} # BFS numbering for free (dicts preserver insertion order); entry == key 0
-    delta = [[corr[d] for d in row] for row in t.values()]
-    return DFA(delta, 0, {i for s, i in corr.items() if s & final}, self.syms)
+    order = {s: i for i, s in enumerate(t)} # BFS numbering for free (dicts preserver insertion order); entry == key 0
+    delta = [[order[d] for d in row] for row in t.values()]
+    return DFA(delta, 0, {i for s, i in order.items() if s & final}, self.syms)
 
   def graphviz(self) -> Digraph:
     g = Digraph(graph_attr={"rankdir": "LR", "dpi": "300"})
@@ -169,7 +240,7 @@ def show(*graphs: Digraph, cols: int = 2):
   rows = (n + cols - 1) // cols
 
   fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 5 * rows), squeeze=False)
-  for ax, im in zip(axes.flat, imgs, strict=True):
+  for ax, im in zip(axes.flat, imgs, strict=False):
     ax.imshow(im)
     ax.axis("off")
   for ax in axes.flat[n:]: ax.axis("off")
@@ -178,25 +249,28 @@ def show(*graphs: Digraph, cols: int = 2):
   plt.show(block=True)
   plt.close(fig)
 
-ab = NFA.symbols("ab")
-cd = NFA.symbols("cd")
 
-# abcd = ab * cd
-# print(abcd.move(0, "b"))
-# print(abcd)
-# abcd.graphviz()
-# abcd_det = abcd.det()
-# abcd_det.graphviz()
+if __name__ == "__main__":
+  a = NFA.symbols("a")
+  b = NFA.symbols("b")
+  a_b = (a | b).star()
+  a_b.det().min()
+  # show(a_b.graphviz(), a_b.det().graphviz(), a_b.det().min().graphviz())
 
-# ab_cd = (ab | cd).star()
-# show(ab_cd.graphviz(), ab_cd.det().graphviz())
+  ab = NFA.symbols("ab")
+  cd = NFA.symbols("cd")
 
-# a3 = NFA.symbols("a").pow(3)
-# a3.det().graphviz()
+  # abcd = ab * cd
+  # show(abcd.graphviz(), abcd.det().graphviz(), abcd.det().min().graphviz())
 
-astar = NFA.symbols("a").star()
-show(astar.graphviz(), astar.det().graphviz())
+  # ab_cd = (ab | cd).star()
+  # show(ab_cd.graphviz(), ab_cd.det().graphviz(), ab_cd.det().min().graphviz())
 
-# aplus = NFA.symbols("a").plus()
-# aplus.graphviz()
-# aplus.det().graphviz()
+  # a3 = NFA.symbols("a").pow(3)
+  # show(a3.graphviz(), a3.det().graphviz(), a3.det().min().graphviz())
+  #
+  # astar = NFA.symbols("a").star()
+  # show(astar.graphviz(), astar.det().graphviz(), astar.det().min().graphviz())
+  #
+  # aplus = NFA.symbols("a").plus()
+  # show(aplus.graphviz(), aplus.det().graphviz(), aplus.det().min().graphviz())
