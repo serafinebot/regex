@@ -75,6 +75,7 @@ class DFA:
     nonfinal = [i for i in range(n_states) if i not in self.final]
     for a, b in product(self.final, nonfinal): tbl[a, b] = 0
 
+    # hopcroft minimization
     changes, i = True, 0
     while changes:
       changes = False
@@ -86,18 +87,25 @@ class DFA:
             tbl[a, b] = i
             changes = True
 
+    # find all state combinations to be merged and build a correlation (old id -> new id) dictionary
+    # tbl.unset() is not enough as it only merges pairs of two at a time, requiring multiple min() calls
+    merge = (v for i in range(tbl.n) if len(v := (i, *(j for j in range(i) if tbl[i, j] is None))) > 1)
     corr = {i: _mask(i) for i in range(n_states)}
-    for a, b in tbl.unset(): corr[a] = corr[b] = _mask(a, b)
+    for v in merge:
+      m = _mask(*v)
+      for i in v: corr[i] = m
 
+    # build transition dict (state id -> transitions) in bfs order
+    # dicts preserve insertion order so entry = key 0
     t: dict[int,tuple[int,...]] = {}
     entry, final = corr[self.entry], {corr[f] for f in self.final}
     q = deque([entry])
     while q:
       s = q.popleft()
       if s in t: continue
-      sd = next(_mask_iter(s)) # all transitions *should* match for all merged states
-      t[s] = [corr[c] for c in self.delta[sd]]
-      q += t[s]
+      # all transitions *should* match for all merged states (only one transition is needed per state set)
+      t[s] = [corr[c] for c in self.delta[next(_mask_iter(s))]]
+      q += list(filter(lambda x: x not in t, t[s]))
 
     order = {s: i for i, s in enumerate(t)}
     delta = [[order[d] for d in row] for row in t.values()]
@@ -203,8 +211,8 @@ class NFA:
     clos = [[_mask(*self.closure(self.move({s}, a))) for a in self.syms] for s in range(len(self.delta))]
     def c(s: int) -> tuple[int, ...]: return tuple(reduce(op.or_, (clos[i][a] for i in _mask_iter(s)), 0) for a in range(n_syms))
 
-    # mark-on-enqueue worklist: every state enters q exactly once
-    # and t's insertion order IS the BFS discovery order
+    # build transition dict (state id -> transitions) in bfs order
+    # dicts preserve insertion order so entry = key 0
     t: dict[int,tuple[int,...]] = {entry: ()}
     q = deque([entry])
     while q:
@@ -215,7 +223,7 @@ class NFA:
           t[d] = ()
           q.append(d)
 
-    order = {s: i for i, s in enumerate(t)} # BFS numbering for free (dicts preserver insertion order); entry == key 0
+    order = {s: i for i, s in enumerate(t)}
     delta = [[order[d] for d in row] for row in t.values()]
     return DFA(delta, 0, {i for s, i in order.items() if s & final}, self.syms)
 
@@ -254,23 +262,22 @@ if __name__ == "__main__":
   a = NFA.symbols("a")
   b = NFA.symbols("b")
   a_b = (a | b).star()
-  a_b.det().min()
-  # show(a_b.graphviz(), a_b.det().graphviz(), a_b.det().min().graphviz())
+  show(a_b.graphviz(), a_b.det().graphviz(), a_b.det().min().graphviz())
 
   ab = NFA.symbols("ab")
   cd = NFA.symbols("cd")
 
-  # abcd = ab * cd
-  # show(abcd.graphviz(), abcd.det().graphviz(), abcd.det().min().graphviz())
+  abcd = ab * cd
+  show(abcd.graphviz(), abcd.det().graphviz(), abcd.det().min().graphviz())
 
-  # ab_cd = (ab | cd).star()
-  # show(ab_cd.graphviz(), ab_cd.det().graphviz(), ab_cd.det().min().graphviz())
+  ab_cd = (ab | cd).star()
+  show(ab_cd.graphviz(), ab_cd.det().graphviz(), ab_cd.det().min().graphviz())
 
-  # a3 = NFA.symbols("a").pow(3)
-  # show(a3.graphviz(), a3.det().graphviz(), a3.det().min().graphviz())
-  #
-  # astar = NFA.symbols("a").star()
-  # show(astar.graphviz(), astar.det().graphviz(), astar.det().min().graphviz())
-  #
-  # aplus = NFA.symbols("a").plus()
-  # show(aplus.graphviz(), aplus.det().graphviz(), aplus.det().min().graphviz())
+  a3 = NFA.symbols("a").pow(3)
+  show(a3.graphviz(), a3.det().graphviz(), a3.det().min().graphviz())
+
+  astar = NFA.symbols("a").star()
+  show(astar.graphviz(), astar.det().graphviz(), astar.det().min().graphviz())
+
+  aplus = NFA.symbols("a").plus()
+  show(aplus.graphviz(), aplus.det().graphviz(), aplus.det().min().graphviz())
